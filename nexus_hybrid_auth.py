@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class HybridAuthService:
     def __init__(self):
         """Initialize hybrid authentication"""
-        self.jwt_secret = os.environ.get('JWT_SECRET', 'nexus-secret')
+        self.jwt_secret = os.environ.get('JWT_SECRET')
         self.jwt_algorithm = 'HS256'
         self.token_expiry = 7  # days
         
@@ -38,6 +38,14 @@ class HybridAuthService:
         
         logger.info(f"Hybrid Auth initialized (OAuth: {self.oauth_enabled})")
     
+    def _require_jwt_secret(self) -> str:
+        """Fail closed when signing material is missing or predictably weak."""
+        secret = self.jwt_secret
+        if (not isinstance(secret, str) or secret != secret.strip()
+                or len(secret.encode("utf-8")) < 32):
+            raise ValueError("JWT_SECRET must contain at least 32 bytes of signing material")
+        return secret
+
     def create_jwt_token(
         self,
         user_id: str,
@@ -46,6 +54,9 @@ class HybridAuthService:
         custom_claims: Optional[Dict] = None
     ) -> str:
         """Create JWT token"""
+        secret = self._require_jwt_secret()
+        if custom_claims and set(custom_claims) & {"user_id", "email", "role", "exp", "iat", "nbf", "iss", "aud", "sub", "jti"}:
+            raise ValueError("Custom claims cannot replace authentication or registered claims")
         payload = {
             "user_id": user_id,
             "email": email,
@@ -57,13 +68,18 @@ class HybridAuthService:
         if custom_claims:
             payload.update(custom_claims)
         
-        token = jwt.encode(payload, self.jwt_secret, algorithm=self.jwt_algorithm)
+        token = jwt.encode(payload, secret, algorithm=self.jwt_algorithm)
         return token
     
     def verify_jwt_token(self, token: str) -> Dict:
         """Verify and decode JWT token"""
         try:
-            payload = jwt.decode(token, self.jwt_secret, algorithms=[self.jwt_algorithm])
+            secret = self._require_jwt_secret()
+        except ValueError:
+            return {"valid": False, "error": "Authentication signing key is not configured"}
+        try:
+            payload = jwt.decode(token, secret, algorithms=[self.jwt_algorithm],
+                                 options={"require": ["exp", "iat", "user_id", "email", "role"]})
             return {
                 "valid": True,
                 "payload": payload
